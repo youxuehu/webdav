@@ -6,6 +6,8 @@ RUN apk --update add ca-certificates
 
 WORKDIR /webdav/
 
+RUN go env -w GOPROXY=https://goproxy.cn,direct
+
 COPY ./go.mod ./
 COPY ./go.sum ./
 RUN go mod download

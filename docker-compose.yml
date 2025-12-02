@@ -1,0 +1,22 @@
+services:
+  webdav:
+    build: .
+    container_name: ${CONTAINER_NAME:-webdav}
+    ports:
+      - "${WEBDAV_PORT:-6060}:6060"
+    volumes:
+      - ${CONFIG_PATH:-./config.yml}:/config.yml:ro
+      - ${DATA_PATH:-./data}:/data
+      - ${LOGS_PATH:-./logs}:/logs
+    command: -c /config.yml
+    env_file:
+     - .env 
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:6060/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    labels:
+      - "com.webdav.description=${SERVICE_DESCRIPTION:-WebDAV Server}"
+      - "com.webdav.version=${SERVICE_VERSION:-latest}"
