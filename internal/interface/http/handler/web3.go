@@ -4,11 +4,16 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
-
+	"time"
+	"strconv"
 	"github.com/yeying-community/webdav/internal/domain/user"
 	"github.com/yeying-community/webdav/internal/infrastructure/auth"
 	"github.com/yeying-community/webdav/internal/interface/http/dto"
 	"go.uber.org/zap"
+	"regexp"
+    "golang.org/x/crypto/sha3"
+    "math/rand"
+	"fmt"
 )
 
 // Web3Handler Web3 认证处理器
@@ -29,6 +34,105 @@ func NewWeb3Handler(
 		userRepo: userRepo,
 		logger:   logger,
 	}
+}
+
+type AddressInfo struct {
+    CoinBalance string `json:"coin_balance"`
+}
+
+func HasBalance(address string) bool {
+	url := "https://blockscout.yeying.pub/backend/api/v2/addresses/" + address
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+
+	var info AddressInfo
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return false
+	}
+
+	balance, err := strconv.Atoi(info.CoinBalance)
+	if err != nil {
+		return false
+	}
+
+	return balance > 0
+}
+
+// 验证以太坊地址合法性
+func IsValidAddress(address string) bool {
+    // 1. 基础格式检查
+    re := regexp.MustCompile(`^0x[0-9a-fA-F]{40}$`)
+    if !re.MatchString(address) {
+        return false
+    }
+    // 2. EIP-55 校验和检查
+    return verifyChecksum(address)
+}
+
+func verifyChecksum(address string) bool {
+    address = strings.TrimPrefix(address, "0x")
+    hash := sha3.NewLegacyKeccak256()
+    hash.Write([]byte(strings.ToLower(address)))
+    digest := hash.Sum(nil)
+    for i := 0; i < 40; i++ {
+        c := address[i]
+        hashByte := digest[i/2]
+        if i%2 == 0 {
+            hashByte >>= 4
+        } else {
+            hashByte &= 0x0f
+        }
+        if (hashByte >= 8 && c < 'A') || (hashByte < 8 && c > '9') {
+            return false
+        }
+    }
+    return true
+}
+
+var (
+    adjectives = []string{"Quick", "Lazy", "Funny", "Serious", "Brave"}
+    nouns      = []string{"Fox", "Dog", "Cat", "Mouse", "Wolf"}
+)
+
+func generateHumanReadableName() string {
+    rand.Seed(time.Now().UnixNano())
+    adj := adjectives[rand.Intn(len(adjectives))]
+    noun := nouns[rand.Intn(len(nouns))]
+    num := rand.Intn(100)
+    return fmt.Sprintf("%s%s%d", adj, noun, num)
+}
+
+func addUser(r *http.Request, w http.ResponseWriter, h *Web3Handler, address string) (*user.User, error) {
+	// 创建用户
+	userName := generateHumanReadableName()
+	h.logger.Warn("userName:" + userName)
+	u := user.NewUser(userName, userName)
+	// 设置钱包地址
+	u.SetWalletAddress(strings.ToLower(address))
+	// 设置权限
+	u.Permissions = user.ParsePermissions("CRUD")
+	// 保存用户
+	ctx := r.Context()
+	if err := h.userRepo.Save(ctx, u); err != nil {
+		h.logger.Error("failed to create user", zap.String("address", address))
+		return nil, err
+	}
+	return u, nil
+}
+
+func RegisterWalletAccount(r *http.Request, w http.ResponseWriter, h *Web3Handler, address string) (*user.User, error)  {
+	ctx := r.Context()
+	u, err := h.userRepo.FindByWalletAddress(ctx, address)
+	if err != nil {
+		// 不存在，则添加
+		return addUser(r, w, h, address)
+	}
+	return u, err
 }
 
 // HandleChallenge 处理挑战请求
@@ -59,9 +163,24 @@ func (h *Web3Handler) HandleChallenge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !IsValidAddress(address) {
+		h.sendError(w, http.StatusBadRequest, "MISSING_ADDRESS", "Address parameter is invalid, address " + address)
+		return
+	}
+
 	// 规范化地址
 	address = strings.ToLower(strings.TrimSpace(address))
 
+	// 检查当前钱包账户地址是否有余额
+	if !HasBalance(address) {
+		h.logger.Error("The balance of the web3 wallet account is 0", zap.String("address", address))
+		h.sendError(w, http.StatusInternalServerError, "BALANCE_FETCH_FAIL", "The balance of the web3 wallet account is 0")
+		return
+	} else {
+		// 注册钱包账户
+		RegisterWalletAccount(r, w, h, address)
+	}
+	
 	// 检查用户是否存在
 	ctx := r.Context()
 	u, err := h.userRepo.FindByWalletAddress(ctx, address)
